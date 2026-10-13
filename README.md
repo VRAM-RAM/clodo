@@ -6,6 +6,7 @@
 
 > [!WARNING] 
 > Clodo est un troll, dérivé de Claude (ce que j'estime assez évident).
+
 \
 \
 Ici se trouve l'ensemble du code de **Clodo**. 
