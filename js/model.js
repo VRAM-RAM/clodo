@@ -144,31 +144,22 @@ function handleWorker(msg) {
 
 /* Chargement                                                          */
 
-const GGUF_CHUNK = 8 * 1024 * 1024; // 8 Mio par bloc
-const GGUF_RETRIES = 4;
+const GGUF_RETRIES = 3;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchWithTimeout(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Lit un flot complet (repli quand le serveur ignore les requêtes `Range`).
-async function downloadStream(onProgress) {
+// Télécharge le GGUF d'un seul flot (rapide). On retente le flot complet
+// quelques fois en cas de coupure réseau, sans ralentir le cas nominal.
+async function downloadGguf(onProgress) {
   let lastError;
   for (let attempt = 1; attempt <= GGUF_RETRIES + 1; attempt++) {
     try {
-      const response = await fetchWithTimeout(GGUF_URL, {}, 60000);
+      const response = await fetch(GGUF_URL);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length')) || 0;
+
       const reader = response.body.getReader();
       const chunks = [];
       let received = 0;
@@ -180,13 +171,14 @@ async function downloadStream(onProgress) {
         onProgress(received, total);
       }
       if (total && received !== total) throw new Error(`flot incomplet (${received}/${total})`);
-      const out = new Uint8Array(received);
+
+      const gguf = new Uint8Array(received);
       let offset = 0;
       for (const chunk of chunks) {
-        out.set(chunk, offset);
+        gguf.set(chunk, offset);
         offset += chunk.length;
       }
-      return out;
+      return gguf;
     } catch (err) {
       lastError = err;
       if (attempt > GGUF_RETRIES) break;
@@ -194,79 +186,6 @@ async function downloadStream(onProgress) {
     }
   }
   throw lastError;
-}
-
-// Télécharge le GGUF par blocs `Range`, avec reprise sur erreur réseau. Le CDN
-// de Hugging Face coupe parfois un long flot (« Error in input stream ») : on
-// reprend alors au bloc suivant plutôt que de tout recommencer.
-async function downloadGguf(onProgress) {
-  const head = await fetchWithTimeout(GGUF_URL, {}, 60000);
-  if (!head.ok) throw new Error(`HTTP ${head.status}`);
-  const total = Number(head.headers.get('content-length')) || 0;
-
-  // Sonde de plage : un petit bloc pour vérifier le support (206).
-  let rangeSupported = false;
-  let first = null;
-  if (total > GGUF_CHUNK) {
-    try {
-      const end = GGUF_CHUNK - 1;
-      const probe = await fetchWithTimeout(GGUF_URL, { headers: { Range: `bytes=0-${end}` } }, 30000);
-      if (probe.status === 206) {
-        const block = new Uint8Array(await probe.arrayBuffer());
-        if (block.length === GGUF_CHUNK) {
-          rangeSupported = true;
-          first = block;
-        }
-      }
-    } catch (err) {
-      console.warn('[clodo] plage non supportée, repli sur un flot unique', err);
-    }
-  }
-
-  // Le corps de la sonde (réponse 200) ne sert plus si on passe en mode plages.
-  if (head.body && head.body.cancel) {
-    try {
-      await head.body.cancel();
-    } catch (err) {
-      /* ignore */
-    }
-  }
-
-  if (!rangeSupported) return downloadStream(onProgress);
-
-  const buffer = new Uint8Array(total);
-  buffer.set(first, 0);
-  let offset = first.length;
-  onProgress(offset, total);
-
-  while (offset < total) {
-    const end = Math.min(offset + GGUF_CHUNK, total) - 1;
-    const want = end - offset + 1;
-    let lastError = null;
-    for (let attempt = 1; attempt <= GGUF_RETRIES + 1; attempt++) {
-      try {
-        const response = await fetchWithTimeout(
-          GGUF_URL,
-          { headers: { Range: `bytes=${offset}-${end}` } },
-          60000,
-        );
-        if (response.status !== 206) throw new Error(`HTTP ${response.status}`);
-        const block = new Uint8Array(await response.arrayBuffer());
-        if (block.length !== want) throw new Error(`bloc incomplet (${block.length}/${want})`);
-        buffer.set(block, offset);
-        offset += block.length;
-        onProgress(offset, total);
-        lastError = null;
-        break;
-      } catch (err) {
-        lastError = err;
-        if (attempt > GGUF_RETRIES) break;
-        await delay(500 * attempt);
-      }
-    }
-    if (lastError) throw lastError;
-  }
-  return buffer;
 }
 
 // `module` est le module WebAssembly compilé (partagé avec le worker) ; son
