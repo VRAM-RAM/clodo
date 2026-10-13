@@ -494,13 +494,14 @@ input, textarea { font-family: inherit; }
 }
 @keyframes caret-blink { 50% { opacity: 0; } }
 
-/* Bulle en cours de génération : le texte est saisi par typed.js, on garde les
-   sauts de ligne visibles tant que le Markdown final n'est pas posé. */
+/* Bulle en cours de génération : le texte est révélé caractère par
+   caractère, on garde les sauts de ligne visibles tant que le Markdown
+   final n'est pas posé. */
 .msg-bubble.streaming { white-space: pre-wrap; }
 .msg-bubble.streaming #live-text { white-space: pre-wrap; }
 
-/* Curseur de typed.js. */
-.typed-cursor {
+/* Curseur de la machine à écrire maison. */
+.stream-cursor {
   color: var(--accent);
   font-weight: 400;
   animation: caret-blink 1s steps(1, end) infinite;
@@ -579,7 +580,7 @@ input, textarea { font-family: inherit; }
 
 /* Respecte les préférences de mouvement réduit. */
 @media (prefers-reduced-motion: reduce) {
-  .fade-in, .caret, .typing i, .thinking i, .typed-cursor, .boot-logo { animation: none; }
+  .fade-in, .caret, .typing i, .thinking i, .stream-cursor, .boot-logo { animation: none; }
 }
 
 .typing {

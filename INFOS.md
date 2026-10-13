@@ -108,16 +108,16 @@ interruptible (`cancelGeneration` vide ses `setTimeout`).
 
 La génération est trop lente pour être affichée telle quelle (un token toutes
 les ~400 ms sur mon ordi). `js/chat.js` dissocie donc **génération** (Worker) et **affichage**
-(`typed.js`) :
+(une petite machine à écrire maison) :
 
 - pendant le préremplissage, un indicateur « réflexion » (trois points animés
   `#live-dots`) tient l'utilisateur en patiente ;
-- les chunks générés alimentent `typed.js`, qui égrène le texte caractère par
-  caractère avec un curseur clignotant. `typed.js` ne gère pas le flux
-  nativement (son `append` plante pendant une frappe et son mode `html` casse
-  `&`/`<`), donc on le détourne : `contentType: 'null'` + `replaceText` réécrit
-  pour accumuler du **texte brut**, et un ré-approvisionnement **timé** qui ne
-  rappelle jamais `append` pendant une frappe ;
+- les chunks générés alimentent la machine à écrire (`startTypewriter`), qui
+  égrène le texte caractère par caractère avec un curseur clignotant
+  (`.stream-cursor`). Elle remplace `typed.js`, qui plantait de façon aléatoire
+  (`substring` sur `undefined`) quand ses `append` en flux désynchronisaient sa
+  séquence interne : ici, un simple tampon écrit via `setTimeout`, sans état
+  caché ;
 - seule la bulle en cours est mise à jour (`#live-bubble`), jamais tout le fil :
   pas de reconstruction DOM ni de saut ;
 - le défilement ne suit le bas de page que si l'utilisateur y est déjà
@@ -158,10 +158,10 @@ Les réponses de l'assistant sont rendues par **`@ts-stack/markdown`** (vendu
 dans `js/vendor/`, résolu par une *import map* ; aucun bundler). `js/markdown.js`
 active `sanitize: true` (échappe le HTML brut, rejette les liens `javascript:`)
 et `breaks: true` (sauts de ligne -> `<br>`). Le Markdown n'est appliqué qu'à la
-fin, en remplacement du texte brut frappé par `typed.js`.
+fin, en remplacement du texte brut révélé par la machine à écrire.
 
-> **Licence** : `typed.js` est distribué sous **GPL-3.0** (voir
-> `js/vendor/typed.LICENSE`) ; `@ts-stack/markdown` est sous licence MIT.
+> **Licence** : `@ts-stack/markdown` est distribué sous licence **MIT** (voir
+> `js/vendor/ts-stack-markdown.LICENSE`).
 
 ### Échantillonnage
 
@@ -264,10 +264,10 @@ Pour publier en local, utiliser `cargo xtask serve`.
 - `js/chat.js` — page de chat : conversations, fil, composer (bouton **Envoyer /
   Arrêter**), persona (`systemPrompt()`), réglage **Longueur** de réponse, faux
   réglages (sélecteur de modèle, compteur de contexte, interrupteurs cosmétiques,
-  suggestions, easter egg) et streaming (`typed.js` pour la frappe, puis Markdown
-  rendu dans `#live-bubble`).
+  suggestions, easter egg) et streaming (machine à écrire maison pour la frappe,
+  puis Markdown rendu dans `#live-bubble`).
 - `js/markdown.js` — configuration `@ts-stack/markdown` (sûr) → `renderMarkdown`.
-- `js/vendor/` — bibliothèques vendues (`@ts-stack/markdown`, `typed.js`) + licences.
+- `js/vendor/` — bibliothèque vendue (`@ts-stack/markdown`) + licence.
 
 ## License
 

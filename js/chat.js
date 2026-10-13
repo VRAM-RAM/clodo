@@ -1,11 +1,10 @@
 import { modelLine, isReady, isFailed, onModelChange, generate, cancelGeneration } from './model.js';
 import { renderMarkdown } from './markdown.js';
-import Typed from 'typed.js';
 
 let runtime = null;
 let root = null;
 let unsubModel = null;
-let live = null; // { id, typed, bubble, host, buffer }
+let live = null; // { id, typed, bubble, host, buffer, roast }
 let generating = false; // une génération est en cours (verrou global)
 let state = { list: [], current: null, busy: false, streaming: false };
 
@@ -389,60 +388,55 @@ function refreshModelUI() {
 
 /* Streaming : génération dans le Worker + frappe « vivante »          */
 
-// Budget de temps par caractère : majorant de typed.js (`typeSpeed` + sa
-// randomisation `humanizer`) + marge. Sert à ne ré-`append` **que** lorsque la
-// frappe précédente est terminée (sinon typed.js part en vrille).
-const TYPE_MS = 40;
+// Budget de temps par caractère et taille de lot pour la frappe « vivante ».
+// Sert aussi de majorant au harnais d'attente (`waitForTyping`).
+const TYPE_MS = 22;
+const TYPE_BATCH = 2;
 
-function startTyped(host) {
-  const typed = new Typed(host, {
-    strings: [''],
-    typeSpeed: 24,
-    backSpeed: 0,
-    backDelay: 0,
-    smartBackspace: false,
-    shouldBackspace: false,
-    loop: false,
-    showCursor: true,
-    cursorChar: '▍',
-    // Texte brut : on accumule nous-mêmes (voir l'override ci-dessous).
-    contentType: 'null',
-  });
-  // typed.js en mode `html` interprète son entrée : il mange les balises et
-  // casse les entités `&`/`<` (bug de `typeHtmlChars`). On détourne donc
-  // `replaceText` pour accumuler du **texte brut**, caractère par caractère.
-  typed.replaceText = function (text) {
-    if (this.isInput) this.el.value += text;
-    else this.el.textContent += text;
+// Machine à écrire maison. Remplace `typed.js`, qui plantait de façon
+// aléatoire (`substring` sur `undefined`) lorsque ses `append` en flux
+// désynchronisaient sa séquence interne. Ici : un tampon, un curseur, une
+// révélation progressive — aucun état caché.
+function startTypewriter(host) {
+  const text = document.createElement('span');
+  const cursor = document.createElement('span');
+  cursor.className = 'stream-cursor';
+  cursor.textContent = '▍';
+  host.textContent = '';
+  host.append(text, cursor);
+
+  return {
+    text,
+    queue: '',
+    timer: 0,
+    append(chunk) {
+      if (!chunk) return;
+      this.queue += chunk;
+      if (!this.timer) this.tick();
+    },
+    tick() {
+      if (!this.queue) {
+        this.timer = 0;
+        return;
+      }
+      // Lot adaptatif : au moins `TYPE_BATCH`, mais on borne la traîne à ~50
+      // ticks pour qu'un gros retard (débit génération > frappe) ne fasse pas
+      // patienter plusieurs secondes après la fin du flux.
+      const take = Math.max(TYPE_BATCH, Math.ceil(this.queue.length / 50));
+      this.text.textContent += this.queue.slice(0, take);
+      this.queue = this.queue.slice(take);
+      this.timer = setTimeout(() => this.tick(), TYPE_MS);
+    },
+    destroy() {
+      clearTimeout(this.timer);
+      this.timer = 0;
+      this.queue = '';
+    },
   };
-  return typed;
 }
 
-// Alimente typed.js chunk par chunk. On ne rappelle `append` qu'une fois le
-// précédent entièrement frappé : `append` pendant une frappe en cours ferait
-// planter typed.js (index de séquence invalide).
 function feedTyped(current, chunk) {
-  current.pending += chunk;
-  if (current.ready) flushTyped(current);
-}
-
-function flushTyped(current) {
-  if (live !== current) return;
-  // On n'`append` qu'une fois typed.js redevenu inactif : après avoir terminé sa
-  // chaîne, un `append` programme un avancement (index + 1) différé ; deux
-  // `append` coup sur coup feraient déborder `sequence` (crash de typed.js).
-  if (current.typing) return;
-  if (!current.pending) return;
-  const chunk = current.pending;
-  current.pending = '';
-  current.typing = true;
   current.typed.append(chunk);
-  clearTimeout(current.timer);
-  current.timer = setTimeout(() => {
-    if (live !== current) return;
-    current.typing = false;
-    flushTyped(current);
-  }, chunk.length * TYPE_MS + 60);
 }
 
 // Attend que tout le texte déjà généré soit révélé (plafond de sécurité : on
@@ -450,8 +444,8 @@ function flushTyped(current) {
 async function waitForTyping(current) {
   for (let i = 0; i < 600; i++) {
     if (live !== current || !current.host.isConnected) return;
-    if (current.ready && !current.typing && !current.pending) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (!current.typed.timer && !current.typed.queue) return;
+    await new Promise((resolve) => setTimeout(resolve, 30));
   }
 }
 
@@ -466,8 +460,7 @@ function persistPartial(id, buffer) {
 }
 
 function stopTypedFeed(current) {
-  clearTimeout(current.timer);
-  clearTimeout(current.readyTimer);
+  if (current && current.typed) current.typed.destroy();
 }
 
 function finalize(current, id, { removeIfEmpty = false } = {}) {
@@ -480,7 +473,7 @@ function finalize(current, id, { removeIfEmpty = false } = {}) {
   try {
     current.typed.destroy();
   } catch (err) {
-    console.error('[clodo] typed.destroy failed', err);
+    console.error('[clodo] typewriter.destroy failed', err);
   }
 
   // Arrêt demandé avant que le moindre caractère n'ait été généré : on retire
@@ -614,14 +607,8 @@ function handleSend() {
     return;
   }
 
-  const typed = startTyped(host);
-  live = { id, typed, bubble, host, buffer: '', pending: '', typing: false, ready: false, timer: 0, roast: null };
-  // Laisse typed.js démarrer (sa chaîne initiale vide) avant de le nourrir.
-  const started = live;
-  started.readyTimer = setTimeout(() => {
-    started.ready = true;
-    flushTyped(started);
-  }, 0);
+  const typed = startTypewriter(host);
+  live = { id, typed, bubble, host, buffer: '', roast: null };
 
   const messages = state.current.messages.map((m) => ({ role: m.role, content: m.content }));
   live.roast = injectSystem(messages);

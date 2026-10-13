@@ -13,6 +13,35 @@ let worker = null;
 let listeners = new Set();
 let genSeq = 0;
 let active = null; // { id, handlers }
+let watchdog = 0; // garde-fou : réveille le flux si le Worker meurt en silence
+
+function clearWatchdog() {
+  if (watchdog) {
+    clearTimeout(watchdog);
+    watchdog = 0;
+  }
+}
+
+function armWatchdog() {
+  clearWatchdog();
+  watchdog = setTimeout(() => {
+    const current = active;
+    if (!active) return;
+    active = null;
+    if (current.handlers.onError) {
+      current.handlers.onError(new Error('Génération interrompue : le Worker ne répond plus.'));
+    }
+  }, 120000);
+}
+
+// Signale un échec du Worker à la génération en cours (le cas échéant).
+function failActive(err) {
+  if (!active) return;
+  const { handlers } = active;
+  active = null;
+  clearWatchdog();
+  if (handlers.onError) handlers.onError(err);
+}
 
 function emit() {
   for (const listener of listeners) {
@@ -57,11 +86,19 @@ function ensureWorker() {
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = (event) => handleWorker(event.data);
   worker.onerror = (event) => {
+    const message = (event && event.message) || 'erreur du Worker';
     console.error('[clodo] worker error', event);
-    if (state.status === 'loading') {
-      state = { ...state, status: 'error', error: 'worker failed' };
+    // Un Worker qui plante en pleine génération doit remonter à l'UI, pas
+    // rester silencieux (sinon la bulle reste bloquée sur « réfléchit »).
+    failActive(new Error(message));
+    if (!state.loaded) {
+      state = { ...state, status: 'error', loaded: false, error: message };
       emit();
     }
+  };
+  worker.onmessageerror = (event) => {
+    console.error('[clodo] worker messageerror', event);
+    failActive(new Error('Message invalide reçu du Worker'));
   };
   return worker;
 }
@@ -87,20 +124,150 @@ function handleWorker(msg) {
   if (!active || msg.id !== active.id) return;
 
   const handlers = active.handlers;
-  if (msg.type === 'step') handlers.onStep && handlers.onStep(msg);
-  else if (msg.type === 'end') {
+  if (msg.type === 'step') {
+    armWatchdog();
+    handlers.onStep && handlers.onStep(msg);
+  } else if (msg.type === 'end') {
+    clearWatchdog();
     active = null;
     handlers.onEnd && handlers.onEnd();
   } else if (msg.type === 'error') {
+    clearWatchdog();
     active = null;
     handlers.onError && handlers.onError(new Error(msg.message));
   } else if (msg.type === 'cancelled') {
+    clearWatchdog();
     active = null;
     handlers.onCancel && handlers.onCancel();
   }
 }
 
 /* Chargement                                                          */
+
+const GGUF_CHUNK = 8 * 1024 * 1024; // 8 Mio par bloc
+const GGUF_RETRIES = 4;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Lit un flot complet (repli quand le serveur ignore les requêtes `Range`).
+async function downloadStream(onProgress) {
+  let lastError;
+  for (let attempt = 1; attempt <= GGUF_RETRIES + 1; attempt++) {
+    try {
+      const response = await fetchWithTimeout(GGUF_URL, {}, 60000);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const total = Number(response.headers.get('content-length')) || 0;
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        onProgress(received, total);
+      }
+      if (total && received !== total) throw new Error(`flot incomplet (${received}/${total})`);
+      const out = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return out;
+    } catch (err) {
+      lastError = err;
+      if (attempt > GGUF_RETRIES) break;
+      await delay(800 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+// Télécharge le GGUF par blocs `Range`, avec reprise sur erreur réseau. Le CDN
+// de Hugging Face coupe parfois un long flot (« Error in input stream ») : on
+// reprend alors au bloc suivant plutôt que de tout recommencer.
+async function downloadGguf(onProgress) {
+  const head = await fetchWithTimeout(GGUF_URL, {}, 60000);
+  if (!head.ok) throw new Error(`HTTP ${head.status}`);
+  const total = Number(head.headers.get('content-length')) || 0;
+
+  // Sonde de plage : un petit bloc pour vérifier le support (206).
+  let rangeSupported = false;
+  let first = null;
+  if (total > GGUF_CHUNK) {
+    try {
+      const end = GGUF_CHUNK - 1;
+      const probe = await fetchWithTimeout(GGUF_URL, { headers: { Range: `bytes=0-${end}` } }, 30000);
+      if (probe.status === 206) {
+        const block = new Uint8Array(await probe.arrayBuffer());
+        if (block.length === GGUF_CHUNK) {
+          rangeSupported = true;
+          first = block;
+        }
+      }
+    } catch (err) {
+      console.warn('[clodo] plage non supportée, repli sur un flot unique', err);
+    }
+  }
+
+  // Le corps de la sonde (réponse 200) ne sert plus si on passe en mode plages.
+  if (head.body && head.body.cancel) {
+    try {
+      await head.body.cancel();
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  if (!rangeSupported) return downloadStream(onProgress);
+
+  const buffer = new Uint8Array(total);
+  buffer.set(first, 0);
+  let offset = first.length;
+  onProgress(offset, total);
+
+  while (offset < total) {
+    const end = Math.min(offset + GGUF_CHUNK, total) - 1;
+    const want = end - offset + 1;
+    let lastError = null;
+    for (let attempt = 1; attempt <= GGUF_RETRIES + 1; attempt++) {
+      try {
+        const response = await fetchWithTimeout(
+          GGUF_URL,
+          { headers: { Range: `bytes=${offset}-${end}` } },
+          60000,
+        );
+        if (response.status !== 206) throw new Error(`HTTP ${response.status}`);
+        const block = new Uint8Array(await response.arrayBuffer());
+        if (block.length !== want) throw new Error(`bloc incomplet (${block.length}/${want})`);
+        buffer.set(block, offset);
+        offset += block.length;
+        onProgress(offset, total);
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (attempt > GGUF_RETRIES) break;
+        await delay(500 * attempt);
+      }
+    }
+    if (lastError) throw lastError;
+  }
+  return buffer;
+}
 
 // `module` est le module WebAssembly compilé (partagé avec le worker) ; son
 // absence signale le mode démo (pas de cœur WASM).
@@ -119,38 +286,21 @@ export async function preloadModel(module) {
   emit();
 
   let lastEmit = 0;
+  const onProgress = (received, total) => {
+    const now = performance.now();
+    if (received < total && now - lastEmit < 100) return;
+    lastEmit = now;
+    state = { ...state, progress: total ? Math.min(received / total, 1) : 0, size: received };
+    emit();
+  };
+
   try {
-    const response = await fetch(GGUF_URL);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const total = Number(response.headers.get('content-length')) || 0;
-
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      const now = performance.now();
-      if (now - lastEmit > 100) {
-        lastEmit = now;
-        state = { ...state, progress: total ? received / total : 0, size: received };
-        emit();
-      }
-    }
-
-    const gguf = new Uint8Array(received);
-    let offset = 0;
-    for (const chunk of chunks) {
-      gguf.set(chunk, offset);
-      offset += chunk.length;
-    }
-    state = { ...state, progress: 1 };
+    const gguf = await downloadGguf(onProgress);
+    state = { ...state, progress: 1, size: gguf.length };
     emit();
 
     // Transfert sans copie du GGUF au worker.
-    worker.postMessage({ type: 'load', module, gguf: gguf.buffer }, [gguf.buffer]);
+    ensureWorker().postMessage({ type: 'load', module, gguf: gguf.buffer }, [gguf.buffer]);
   } catch (err) {
     console.error('[clodo] model download failed', err);
     state = { ...state, status: 'error', loaded: false, error: String((err && err.message) || err) };
@@ -167,6 +317,7 @@ export function generate(messages, maxTokens, handlers) {
   const id = ++genSeq;
   if (demo) return demoGenerate(id, handlers);
   active = { id, handlers };
+  armWatchdog();
   ensureWorker().postMessage({ type: 'generate', id, messages, maxTokens });
   return id;
 }
@@ -176,11 +327,13 @@ export function cancelGeneration() {
   if (active.demo) {
     const { handlers, timers } = active;
     active = null;
+    clearWatchdog();
     for (const t of timers) clearTimeout(t);
     timers.clear();
     handlers.onCancel && handlers.onCancel();
     return;
   }
+  clearWatchdog();
   ensureWorker().postMessage({ type: 'cancel', id: active.id });
 }
 
