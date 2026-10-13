@@ -1,0 +1,29 @@
+[workspace]
+members = [".", "xtask"]
+resolver = "2"
+
+[package]
+name = "clodo"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "clodo"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.21"
+tokenizers = { version = "0.21", default-features = false, features = ["unstable_wasm"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Storage", "Window", "console"] }
+js-sys = "0.3"
+
+# candle-core → rand → getrandom : backport JS/WebCrypto pour la cible WASM
+# (voir https://docs.rs/getrandom/#webassembly-support)
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clodo — le meilleur chatbot ia</title>
+  <meta name="description" content="Clodo --">
+
+  <link rel="icon" type="image/svg+xml" href="./assets/logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap"
+    rel="stylesheet">
+
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="boot" class="boot" aria-hidden="false">
+    <div class="boot-inner">
+      <img src="./assets/logo.svg" alt="Clodo" class="boot-logo">
+      <div class="boot-text">Clodo</div>
+      <div class="boot-sub">booting…</div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "@ts-stack/markdown": "./js/vendor/ts-stack-markdown.js",
+        "typed.js": "./js/vendor/typed.js"
+      }
+    }
+  </script>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

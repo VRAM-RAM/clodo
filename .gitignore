@@ -1,0 +1,8 @@
+# Rust
+/target
+
+# Generated WASM glue (built by `wasm-pack build`; committed by deploy.sh)
+/pkg
+
+# macOS
+.DS_Store
