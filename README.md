@@ -2,8 +2,10 @@
 
 > Un assistant d'IA créé en France. Il tourne dans votre navigateur et explose ses concurrents sur tous les aspects ! 
 
+**Essayez-le [ici](https://vram-ram.github.io/clodo/) !**
 
-Clodo est un troll, dérivé de Claude (ce que j'estime assez évident).
+> [!WARNING] 
+> Clodo est un troll, dérivé de Claude (ce que j'estime assez évident).
 \
 \
 Ici se trouve l'ensemble du code de **Clodo**. 
