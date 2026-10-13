@@ -1,19 +1,12 @@
 ## Architecture
 
 ```
-Cargo.toml        -> workspace (la crate clodo + le runner xtask)
-src/lib.rs        -> couche de bindings WASM (#[wasm_bindgen]) : câblage vers le backend
-src/chat.rs       -> backend conversations (stockage localStorage, logique)
-src/model.rs      -> backend modèle (LFM2 quantifié GGUF, état, inférence)
-src/errors.rs     -> type d'erreur (ClodoError)
-src/main.rs       -> exécutable natif de dev (cargo run)
-xtask/            -> tâches en Rust pur (build wasm, serveur, check, deploy)
+xtask/            -> tâches en Rust pur (build wasm, serveur, check, clean)
 index.html        -> application monopage (SPA, routage par hash)
 css/  js/  assets -> frontend (style claude.ai, DEMO mode si pkg/ absent)
 tokenizer.json    -> tokenizer BPE byte-level LFM2 (embarqué à la compilation)
-pkg/              -> généré par wasm-pack (commité au déploiement)
-deploy.sh         -> alternative shell au xtask deploy
-.github/          -> workflow GitHub Actions optionnel (Pages manuel)
+pkg/              -> généré par wasm-pack (recompilé en CI, non commité)
+.github/          -> workflow GitHub Actions (déploiement Pages sur push)
 ```
 
 ## Prérequis
@@ -240,13 +233,18 @@ par le crate `tokenizers`.
 
 ## Déployer sur GitHub Pages
 
-```sh
-cargo xtask deploy     # wasm-pack build + git add -f pkg + commit + push
-```
+Le déploiement est automatique : un `git push` sur `main` déclenche le workflow
+`.github/workflows/pages.yml`, qui compile `pkg/` (wasm-pack) puis publie le site
+via **GitHub Actions**.
 
-Abonne ensuite GitHub Pages sur la branche par défaut (racine `/`). Le site est
-servi par GitHub Pages, tout s'exécute côté visiteur. Alternative : le workflow
-`.github/workflows/pages.yml` (déclenché manuellement, source = GitHub Actions).
+Mise en place (une seule fois) :
+
+1. pousser le dépôt sur GitHub (`git push -u origin main`) ;
+2. **Settings → Pages → Source = « GitHub Actions »**.
+
+Le site est servi par GitHub Pages (`https://<user>.github.io/clodo/`), tout
+s'exécute côté visiteur. `pkg/` n'est **pas** commité : il est reconstruit en CI.
+Pour publier en local, utiliser `cargo xtask serve`.
 
 ## Frontend (js/)
 
@@ -262,7 +260,7 @@ servi par GitHub Pages, tout s'exécute côté visiteur. Alternative : le workfl
 - `js/app.js` — routeur par hash (`#/`, `#/temoignages`, `#/forfaits`,
   `#/chat`, `#/chat/<id>`) + page d'accueil.
 - `js/pages.js` — pages marketing : **Témoignages** et **Forfaits** ; contient les
-  tableaux éditables `TEMOIGNAGES` / `FORFAITS` (placeholders à remplir).
+  tableaux éditables `TEMOIGNAGES` / `FORFAITS`.
 - `js/chat.js` — page de chat : conversations, fil, composer (bouton **Envoyer /
   Arrêter**), persona (`systemPrompt()`), réglage **Longueur** de réponse, faux
   réglages (sélecteur de modèle, compteur de contexte, interrupteurs cosmétiques,

@@ -1,7 +1,7 @@
 # Rust
 /target
 
-# Generated WASM glue (built by `wasm-pack build`; committed by deploy.sh)
+# Generated WASM glue (built by `wasm-pack build`; rebuilt in CI, not committed)
 /pkg
 
 # macOS

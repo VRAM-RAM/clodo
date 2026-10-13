@@ -5,8 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-const GIT_COMMIT_MSG: &str = "build: compile wasm and publish for GitHub Pages";
-
 fn main() {
     let mut args = std::env::args().skip(1);
     let sub = args.next().unwrap_or_default();
@@ -27,7 +25,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        "deploy" => cmd_deploy(),
         "clean" => cmd_clean(),
         _ => usage(),
     }
@@ -62,19 +59,6 @@ fn cmd_check() {
     println!("check OK (host + wasm32)");
 }
 
-fn cmd_deploy() {
-    cmd_build_wasm();
-    run(Command::new("git").args(["add", "-f", "pkg"]), "git add pkg");
-    let committed = Command::new("git")
-        .args(["commit", "-m", GIT_COMMIT_MSG])
-        .status()
-        .expect("git commit");
-    if !committed.success() {
-        eprintln!("(nothing to commit — skipping commit)");
-    }
-    run(Command::new("git").arg("push"), "git push");
-}
-
 fn cmd_clean() {
     if Path::new("pkg").exists() {
         fs::remove_dir_all("pkg").expect("remove pkg/");
@@ -84,7 +68,7 @@ fn cmd_clean() {
 
 fn usage() {
     println!(
-        "cargo xtask <command>\n\ncommands:\n  wasm     build the Rust core to WebAssembly (pkg/)\n  check    run cargo check for the host and wasm32 targets\n  serve    run a static dev server (default :8000)\n  deploy   build wasm, commit pkg/ and push to GitHub\n  clean    remove pkg/"
+        "cargo xtask <command>\n\ncommands:\n  wasm     build the Rust core to WebAssembly (pkg/)\n  check    run cargo check for the host and wasm32 targets\n  serve    run a static dev server (default :8000)\n  host     run a static dev server binding 0.0.0.0 (default :8000)\n  clean    remove pkg/ (deployment is handled by GitHub Actions on push)"
     );
 }
 
