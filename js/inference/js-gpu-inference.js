@@ -1,9 +1,9 @@
 export async function isGpuAvailable() {
-    if (!navigator.gpu) return false;
-
+  try {
+    if (typeof navigator === 'undefined' || !navigator.gpu) return false;
     const adapter = await navigator.gpu.requestAdapter();
-
-    if (!adapter) return false;
-
-    return true;
+    return !!adapter;
+  } catch (err) {
+    return false;
+  }
 }
