@@ -1,0 +1,26 @@
+{
+  "name": "clodo",
+  "version": "1.0.0",
+  "description": "*Un assistant d'IA créé en France. Il tourne dans votre navigateur et explose ses concurrents sur tous les aspects !*",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VRAM-RAM/clodo.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/VRAM-RAM/clodo/issues"
+  },
+  "homepage": "https://github.com/VRAM-RAM/clodo#readme",
+  "dependencies": {
+    "@wllama/wllama": "^3.8.1"
+  }
+}

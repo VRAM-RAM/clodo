@@ -8,6 +8,8 @@
 // que : charger le modèle, puis générer du texte à partir de messages.
 
 import { initSync, model_load, model_status, generate_start, generate_next } from '../pkg/clodo.js';
+import { isGpuAvailable } from './js-gpu-inference.js';
+import { handle_message_using_cpu } from './rust-inference.js';
 
 const cancelled = new Set();
 
@@ -16,6 +18,8 @@ const cancelled = new Set();
 // parallèle. `cancel` est traité immédiatement (hors file) pour pouvoir
 // interrompre la génération en cours entre deux pas.
 let chain = Promise.resolve();
+
+self.gpuAvailable = await isGpuAvailable();
 
 self.onmessage = (event) => {
   const msg = event.data;
@@ -27,38 +31,11 @@ self.onmessage = (event) => {
 };
 
 async function handle(msg) {
-  if (msg.type === 'load') {
-    try {
-      initSync({ module: msg.module });
-      model_load(new Uint8Array(msg.gguf));
-      const status = JSON.parse(model_status());
-      self.postMessage({ type: 'ready', size: status.size, tensors: status.tensors });
-    } catch (err) {
-      self.postMessage({ type: 'error', message: String((err && err.message) || err) });
-    }
+  if (self.gpuAvailable) {
+    console.log("TODO!")
     return;
-  }
-
-  if (msg.type === 'generate') {
-    const { id, messages } = msg;
-    try {
-      let step = JSON.parse(generate_start(JSON.stringify(messages), msg.maxTokens || 256));
-      postStep(id, step);
-      while (!step.done) {
-        // Rend la main au worker pour pouvoir recevoir un éventuel 'cancel'.
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        if (cancelled.has(id)) {
-          cancelled.delete(id);
-          self.postMessage({ type: 'cancelled', id });
-          return;
-        }
-        step = JSON.parse(generate_next());
-        postStep(id, step);
-      }
-      self.postMessage({ type: 'end', id });
-    } catch (err) {
-      self.postMessage({ type: 'error', id, message: String((err && err.message) || err) });
-    }
+  } else {
+    handle_message_using_cpu(msg)
   }
 }
 
