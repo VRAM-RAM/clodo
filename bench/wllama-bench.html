@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clodo — benchmark in-page (wllama vs Rust)</title>
+    <style>
+      body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 2rem; max-width: 62rem; }
+      h1 { font-size: 1.2rem; }
+      button { font: inherit; padding: .5rem 1rem; cursor: pointer; margin-right: .5rem; }
+      button:disabled { opacity: .5; cursor: not-allowed; }
+      pre { background: #f4f4f4; padding: 1rem; white-space: pre-wrap; word-break: break-word; }
+      .env { margin: .5rem 0 1rem; }
+      .ok { color: #0a0; } .bad { color: #c00; }
+    </style>
+  </head>
+  <body>
+    <h1>Benchmark in-page — wllama (WebGPU/CPU) vs cœur Rust WASM</h1>
+    <p>
+      Charge <code>Luth-LFM2-350M-Q4_K_M.gguf</code> et mesure chargement, latence
+      du premier token et tokens/s. Les deux backends tournent dans le même
+      navigateur pour comparer à armes égales. Le flux doit être <strong>progressif</strong>
+      (sinon le correctif « await » de l'adaptateur wllama est cassé).
+    </p>
+    <div class="env" id="env"></div>
+    <div>
+      <button id="runW" disabled>Bench wllama</button>
+      <button id="runR" disabled>Bench Rust (WASM)</button>
+    </div>
+    <pre id="out">En attente…</pre>
+
+    <script type="module">
+      import { Wllama } from '../js/vendor/wllama/wllama.js';
+      import * as wllamaAdapter from '../js/inference/wllama-inference.js';
+      import { isGpuAvailable, isWllamaWebGpuUsable } from '../js/inference/js-gpu-inference.js';
+
+      const GGUF_URL =
+        'https://huggingface.co/kurakurai/Luth-LFM2-350M-GGUF/resolve/main/LFM2-350M-Q4_K_M.gguf';
+      const PROMPTS = ['Bonjour, présente-toi en une phrase.', 'Compte de 1 à 10.'];
+      const MAX_TOKENS = 128;
+
+      const env = document.getElementById('env');
+      const out = document.getElementById('out');
+      const runW = document.getElementById('runW');
+      const runR = document.getElementById('runR');
+
+      const log = (s) => { out.textContent += s + '\n'; };
+      const reset = () => { out.textContent = ''; };
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      let cachedBytes = null;
+      async function gguf() {
+        if (cachedBytes) return cachedBytes;
+        const res = await fetch(GGUF_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const total = Number(res.headers.get('content-length')) || 0;
+        const reader = res.body.getReader();
+        const chunks = [];
+        let received = 0;
+        let lastPct = -5;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          const pct = total ? Math.floor((received / total) * 100) : 0;
+          if (pct >= lastPct + 10) { lastPct = pct; log(`  téléchargement ${pct} %`); }
+        }
+        const bytes = new Uint8Array(received);
+        let off = 0;
+        for (const c of chunks) { bytes.set(c, off); off += c.length; }
+        cachedBytes = bytes;
+        return bytes;
+      }
+
+      // `start(messages, max)` -> first step JSON string; `next()` -> step JSON string.
+      async function bench(label, loadFn, start, next) {
+        const bytes = await gguf();
+        const tLoad = performance.now();
+        await loadFn(bytes);
+        log(`\n[${label}] chargement : ${(performance.now() - tLoad).toFixed(0)} ms`);
+
+        for (const prompt of PROMPTS) {
+          const messages = JSON.stringify([{ role: 'user', content: prompt }]);
+          const t0 = performance.now();
+          JSON.parse(await start(messages, MAX_TOKENS));
+          const startMs = performance.now() - t0;
+          const arrivals = [];
+          let text = '';
+          let done = false;
+          let guard = 0;
+          while (!done && guard++ < 50000) {
+            const step = JSON.parse(await next());
+            if (step.chunk) { arrivals.push(performance.now() - t0); text += step.chunk; }
+            if (step.done) done = true;
+            else await sleep(0);
+          }
+          const totalMs = performance.now() - t0;
+          const n = arrivals.length;
+          const genMs = n > 0 ? totalMs - arrivals[0] : 0;
+          const progressive = n >= 3 && arrivals[0] < totalMs - totalMs * 0.2;
+          log(`[${label}] « ${prompt} »`);
+          log(`  getstart=${startMs.toFixed(0)}ms  1er_token=${arrivals[0]?.toFixed(0)}ms  tokens=${n}  total=${totalMs.toFixed(0)}ms`);
+          log(`  tok/s=${genMs > 0 ? (n / (genMs / 1000)).toFixed(2) : '0'}  flux_progressif=${progressive ? 'OK' : 'SUSPECT'}`);
+          log(`  texte=${JSON.stringify(text)}`);
+        }
+      }
+
+      async function withButtons(fn) {
+        runW.disabled = true; runR.disabled = true;
+        try { await fn(); } catch (err) { log(`\nERREUR : ${err?.stack || err}`); }
+        finally { runW.disabled = false; runR.disabled = false; }
+      }
+
+      (async () => {
+        const gpu = await isGpuAvailable();
+        const usable = await isWllamaWebGpuUsable();
+        let libver = 'n/a';
+        try { libver = Wllama.getLibllamaVersion?.() ?? 'n/a'; } catch {}
+        env.innerHTML =
+          `secureContext=<span class="${isSecureContext ? 'ok' : 'bad'}">${isSecureContext}</span> ` +
+          `navigator.gpu=${!!navigator.gpu} requestAdapter=${gpu} ` +
+          `wllamaWebGPU=${usable ? 'oui' : 'non'} libllama=${libver} ` +
+          `SAB=${typeof SharedArrayBuffer !== 'undefined'}`;
+        runW.disabled = false;
+        runR.disabled = false;
+      })();
+
+      runW.onclick = () => withButtons(async () => {
+        reset();
+        await bench('wllama', async (b) => {
+          const t0 = performance.now();
+          await wllamaAdapter.model_load(b);
+          log(`  load=${(performance.now() - t0).toFixed(0)}ms`);
+          const t1 = performance.now();
+          await wllamaAdapter.warmup();
+          log(`  warmup=${(performance.now() - t1).toFixed(0)}ms`);
+        }, wllamaAdapter.generate_start, () => wllamaAdapter.generate_next());
+        log(`\n[status] ${wllamaAdapter.model_status()}`);
+      });
+
+      runR.onclick = () => withButtons(async () => {
+        reset();
+        log('initialisation du cœur Rust…');
+        const rust = await import('../pkg/clodo.js').catch((err) => {
+          log('Échec du chargement de ../pkg/clodo.js : ' + (err && err.message));
+          log('Compile-le avec « cargo xtask wasm » puis recharge la page.');
+          throw err;
+        });
+        await rust.default();
+        await bench(
+          'rust',
+          async (b) => { rust.model_load(b); },
+          (m, max) => rust.generate_start(m, max),
+          () => rust.generate_next(),
+        );
+        log(`\n[status] ${rust.model_status()}`);
+      });
+    </script>
+  </body>
+</html>

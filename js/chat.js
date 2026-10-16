@@ -635,6 +635,27 @@ function handleSend() {
       await waitForTyping(current);
       finalize(current, id);
     },
+    onNotice(message) {
+      // Repli wllama → Rust : on affiche l'avertissement à la place de
+      // l'indicateur de réflexion, jusqu'aux premiers tokens Rust.
+      if (!live || live.id !== id || !live.host) return;
+      let label = document.getElementById('live-label');
+      if (!label) {
+        label = document.createElement('span');
+        label.className = 'thinking-label';
+        label.id = 'live-label';
+        live.host.before(label);
+      }
+      label.textContent = message;
+      if (!document.getElementById('live-dots')) {
+        const dots = document.createElement('span');
+        dots.className = 'thinking';
+        dots.id = 'live-dots';
+        dots.innerHTML = '<i></i><i></i><i></i>';
+        label.after(dots);
+      }
+      if (isPinnedToBottom()) scrollToBottom();
+    },
     onError(err) {
       generating = false;
       const current = live;

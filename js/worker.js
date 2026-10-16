@@ -7,7 +7,7 @@
 // reste sur le thread principal (voir `wasm.js` / `chat.js`). Ici on ne fait
 // que : charger le modèle, puis générer du texte à partir de messages.
 
-import { initSync, model_load, model_status, generate_start, generate_next } from '../pkg/clodo.js';
+import clodoInit, { model_load, model_status, generate_start, generate_next } from '../pkg/clodo.js';
 
 const cancelled = new Set();
 
@@ -29,7 +29,7 @@ self.onmessage = (event) => {
 async function handle(msg) {
   if (msg.type === 'load') {
     try {
-      initSync({ module: msg.module });
+      await clodoInit({ module_or_path: msg.module });
       model_load(new Uint8Array(msg.gguf));
       const status = JSON.parse(model_status());
       self.postMessage({ type: 'ready', size: status.size, tensors: status.tensors });

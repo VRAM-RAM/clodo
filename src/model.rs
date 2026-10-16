@@ -13,7 +13,8 @@
 //!
 //! `<|im_end|>` = id `7` (fin de tour) et `<|endoftext|>` = id `2` arrêtent la
 //! génération. Le cache (attention KV + convolution) est **interne** au modèle :
-//! un préremplissage à `index_pos = 0` le réinitialise.
+//! un préremplissage à `index_pos = 0` le réinitialise, et le module [`crate::chat`]
+//! le **réutilise** d'un tour à l'autre pour ne recalculer que le suffixe nouveau.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -200,6 +201,9 @@ impl Session {
         messages: &[Message],
         params: &GenerationParams,
     ) -> Result<String, ClodoError> {
+        // Préremplissage complet à `pos = 0` : le cache du modèle est
+        // réinitialisé, la copie logique de [`crate::chat`] ne l'est donc plus.
+        crate::chat::reset_cache_state();
         let tokens = self.encode_chat(messages)?;
         if tokens.is_empty() {
             return Ok(String::new());
@@ -266,100 +270,134 @@ fn render_chat(messages: &[Message]) -> Result<String, ClodoError> {
     Ok(prompt)
 }
 
+/// Buffers réutilisés par [`sample`] pour éviter de réallouer (et de trier) le
+/// vecteur complet des scores (~64 000 flottants) à chaque token généré.
+#[derive(Default)]
+struct SampleScratch {
+    scores: Vec<f32>,
+    order: Vec<usize>,
+    weights: Vec<f32>,
+}
+
+thread_local! {
+    static SAMPLE_SCRATCH: RefCell<SampleScratch> = RefCell::new(SampleScratch::default());
+}
+
 /// Échantillonne un id : pénalité de répétition, blocage des n-grammes répétés,
 /// température, `top_k`, `top_p` (nucleus) puis tirage multinomial.
+///
+/// L'implémentation diffère de la version naïve uniquement sur le **coût** : le
+/// `top_k` est obtenu par sélection partielle (`select_nth_unstable_by`, O(V)) et
+/// le `top_p` ne trie que les candidats encore retenus (au plus `top_k`), au lieu
+/// de trier les 64 000 logits complets deux fois par token.
 pub(crate) fn sample(logits: &[f32], history: &[u32], params: &GenerationParams) -> u32 {
-    let mut scores = logits.to_vec();
+    SAMPLE_SCRATCH.with(|scratch| {
+        let SampleScratch {
+            scores,
+            order,
+            weights,
+        } = &mut *scratch.borrow_mut();
 
-    if params.repetition_penalty != 1.0 {
-        let mut seen = HashSet::new();
-        for &token in history {
-            if !seen.insert(token) {
-                continue;
-            }
-            if let Some(score) = scores.get_mut(token as usize) {
-                if *score > 0.0 {
-                    *score /= params.repetition_penalty;
-                } else {
-                    *score *= params.repetition_penalty;
+        scores.clear();
+        scores.extend_from_slice(logits);
+
+        if params.repetition_penalty != 1.0 {
+            let mut seen = HashSet::new();
+            for &token in history {
+                if !seen.insert(token) {
+                    continue;
+                }
+                if let Some(score) = scores.get_mut(token as usize) {
+                    if *score > 0.0 {
+                        *score /= params.repetition_penalty;
+                    } else {
+                        *score *= params.repetition_penalty;
+                    }
                 }
             }
         }
-    }
 
-    let n = params.no_repeat_ngram_size;
-    if n > 0 && history.len() >= n {
-        let prefix = &history[history.len() - (n - 1)..];
-        for i in 0..=(history.len() - n) {
-            if &history[i..i + n - 1] == prefix {
-                let banned = history[i + n - 1] as usize;
-                if banned < scores.len() {
-                    scores[banned] = f32::NEG_INFINITY;
+        let n = params.no_repeat_ngram_size;
+        if n > 0 && history.len() >= n {
+            let prefix = &history[history.len() - (n - 1)..];
+            for i in 0..=(history.len() - n) {
+                if &history[i..i + n - 1] == prefix {
+                    let banned = history[i + n - 1] as usize;
+                    if banned < scores.len() {
+                        scores[banned] = f32::NEG_INFINITY;
+                    }
                 }
             }
         }
-    }
 
-    if params.temperature <= 0.0 {
-        return argmax(&scores);
-    }
+        if params.temperature <= 0.0 {
+            return argmax(scores);
+        }
 
-    for score in scores.iter_mut() {
-        *score /= params.temperature;
-    }
-
-    if params.top_k > 0 && params.top_k < scores.len() {
-        let mut order: Vec<usize> = (0..scores.len()).collect();
-        order.sort_by(|&a, &b| cmp_desc(scores[a], scores[b]));
-        let threshold = scores[order[params.top_k - 1]];
         for score in scores.iter_mut() {
-            if *score < threshold {
-                *score = f32::NEG_INFINITY;
-            }
+            *score /= params.temperature;
         }
-    }
 
-    if params.top_p < 1.0 {
-        let mut order: Vec<usize> = (0..scores.len())
-            .filter(|&i| scores[i].is_finite())
-            .collect();
-        order.sort_by(|&a, &b| cmp_desc(scores[a], scores[b]));
-        if !order.is_empty() {
-            let max = scores[order[0]];
-            let probs: Vec<f32> = order.iter().map(|&i| (scores[i] - max).exp()).collect();
-            let sum: f32 = probs.iter().sum();
-            let mut cum = 0.0f32;
-            for (j, &i) in order.iter().enumerate() {
-                if cum > params.top_p {
-                    scores[i] = f32::NEG_INFINITY;
+        // `top_k` : sélection partielle O(V) pour ne garder que les k meilleurs.
+        if params.top_k > 0 && params.top_k < scores.len() {
+            order.clear();
+            order.extend(0..scores.len());
+            let (_, &mut threshold_idx, _) =
+                order.select_nth_unstable_by(params.top_k - 1, |&a, &b| cmp_desc(scores[a], scores[b]));
+            let threshold = scores[threshold_idx];
+            for score in scores.iter_mut() {
+                if *score < threshold {
+                    *score = f32::NEG_INFINITY;
                 }
-                cum += probs[j] / sum;
             }
         }
-    }
 
-    let max = scores
-        .iter()
-        .copied()
-        .filter(|s| s.is_finite())
-        .fold(f32::NEG_INFINITY, f32::max);
-    if !max.is_finite() {
-        return argmax(logits);
-    }
-    let weights: Vec<f32> = scores.iter().map(|&s| (s - max).exp()).collect();
-    let sum: f32 = weights.iter().sum();
-    if !(sum > 0.0) {
-        return argmax(&scores);
-    }
-
-    let mut r = random_f32() * sum;
-    for (idx, &w) in weights.iter().enumerate() {
-        r -= w;
-        if r <= 0.0 {
-            return idx as u32;
+        // `top_p` (nucleus) : ne trie que les candidats encore finis.
+        if params.top_p < 1.0 {
+            order.clear();
+            order.extend((0..scores.len()).filter(|&i| scores[i].is_finite()));
+            order.sort_by(|&a, &b| cmp_desc(scores[a], scores[b]));
+            if !order.is_empty() {
+                let max = scores[order[0]];
+                let sum: f32 = order.iter().map(|&i| (scores[i] - max).exp()).sum();
+                let mut cum = 0.0f32;
+                for &i in order.iter() {
+                    // Poids calculé *avant* masquage, comme la version de
+                    // référence (le budget cumulé ne dépend pas des masques).
+                    let p = (scores[i] - max).exp() / sum;
+                    if cum > params.top_p {
+                        scores[i] = f32::NEG_INFINITY;
+                    }
+                    cum += p;
+                }
+            }
         }
-    }
-    argmax(&scores)
+
+        let max = scores
+            .iter()
+            .copied()
+            .filter(|s| s.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !max.is_finite() {
+            return argmax(scores);
+        }
+
+        weights.clear();
+        weights.extend(scores.iter().map(|&s| (s - max).exp()));
+        let sum: f32 = weights.iter().sum();
+        if !(sum > 0.0) {
+            return argmax(scores);
+        }
+
+        let mut r = random_f32() * sum;
+        for (idx, &w) in weights.iter().enumerate() {
+            r -= w;
+            if r <= 0.0 {
+                return idx as u32;
+            }
+        }
+        argmax(scores)
+    })
 }
 
 /// Flottant uniforme dans `[0, 1)` (navigateur en WASM, xorshift sinon).
