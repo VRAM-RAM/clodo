@@ -1,13 +1,17 @@
 import { init } from './wasm.js';
-import { mountChat } from './chat.js';
+import { mountChat } from './pages/chat.js';
 import { preloadModel, modelLine, onModelChange } from './model.js';
 import { nav, GITHUB_URL } from './site.js';
-import { renderTemoignages, renderForfaits } from './pages.js';
+import { renderForfaits } from './pages/forfaits.js';
+import { renderTemoignages } from './pages/temoignages.js';
+import { renderBenchPage } from './pages/bench.js';
+import { enhance } from './ui/index.js';
+import { renderFirstFalseSourcePage, renderSecondFalseSourcePage } from './pages/click_for_sources.js';
 
 const app = document.getElementById('app');
 const boot = document.getElementById('boot');
 
-function esc(s) {
+export function esc(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;',
     '<': '&lt;',
@@ -92,6 +96,21 @@ function route() {
   }
   if (hash.startsWith('#/forfaits')) {
     app.innerHTML = renderForfaits();
+    return;
+  }
+  if (hash.startsWith('#/bench')) {
+    app.innerHTML = renderBenchPage();
+    enhance(app);
+    return;
+  }
+  if (hash.startsWith('#/sources')) {
+    app.innerHTML = renderFirstFalseSourcePage();
+    enhance(app);
+    return;
+  }
+  if (hash.startsWith('#/source')) {
+    app.innerHTML = renderSecondFalseSourcePage();
+    enhance(app);
     return;
   }
   renderHome(runtime);

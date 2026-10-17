@@ -5,15 +5,24 @@
 // Ainsi le calcul lourd (~des centaines de ms par token en WASM) ne bloque
 // jamais le thread principal : l'interface reste fluide.
 
+import * as wllama from './inference/wllama-inference.js';
+import { isWllamaWebGpuUsable } from './inference/js-gpu-inference.js';
+
+// Message affiché si on doit abandonner wllama en pleine génération.
+const WLLAMA_FALLBACK_NOTICE =
+  'Oups ! Désolé, Clodo a une extinction de voix ! Nous relançons la génération…';
+
 const GGUF_URL = 'https://huggingface.co/kurakurai/Luth-LFM2-350M-GGUF/resolve/main/LFM2-350M-Q4_K_M.gguf';
 
-let state = { status: 'idle', loaded: false, progress: 0, size: 0, tensors: 0, error: null };
+let state = { status: 'idle', loaded: false, progress: 0, size: 0, tensors: 0, error: null, backend: null };
 let demo = false;
 let worker = null;
 let listeners = new Set();
 let genSeq = 0;
 let active = null; // { id, handlers }
 let watchdog = 0; // garde-fou : réveille le flux si le Worker meurt en silence
+let coreModule = null; // module WASM partagé, gardé pour un repli à chaud vers Rust
+let pendingGguf = null; // octets GGUF gardés en RAM tant qu'on est sur wllama
 
 function clearWatchdog() {
   if (watchdog) {
@@ -70,7 +79,8 @@ export function modelLine() {
   if (state.status === 'error') return 'Modèle indisponible — rechargez la page.';
   if (state.loaded) {
     const mo = state.size ? ` (${(state.size / 1e6).toFixed(0)} Mo)` : '';
-    return `Modèle prêt${mo}.`;
+    const backend = state.backend === 'wllama' ? ' (GPU)' : state.backend === 'rust' ? ' (CPU)' : '';
+    return `Modèle prêt${mo}${backend}.`;
   }
   if (state.status === 'loading') {
     return `Téléchargement du modèle… ${Math.round(state.progress * 100)} %`;
@@ -114,6 +124,13 @@ function handleWorker(msg) {
       tensors: msg.tensors || 0,
     };
     emit();
+    // Repli en pleine génération : le cœur Rust vient de charger, on relance.
+    if (active && active.resume) {
+      const resume = active.resume;
+      active.resume = null;
+      active.backend = 'rust';
+      resume();
+    }
     return;
   }
   if (msg.type === 'error' && !msg.id) {
@@ -188,6 +205,16 @@ async function downloadGguf(onProgress) {
   throw lastError;
 }
 
+// Transfère le GGUF (sans copie) au Worker Rust et reflète le backend choisi.
+// Utilisé au chargement nominal comme au repli après un échec de chargement ou
+// de préchauffage de wllama.
+function startRustWorker(gguf) {
+  pendingGguf = null;
+  ensureWorker().postMessage({ type: 'load', module: coreModule, gguf: gguf.buffer }, [gguf.buffer]);
+  state = { ...state, backend: 'rust' };
+  emit();
+}
+
 // `module` est le module WebAssembly compilé (partagé avec le worker) ; son
 // absence signale le mode démo (pas de cœur WASM).
 export async function preloadModel(module) {
@@ -200,6 +227,7 @@ export async function preloadModel(module) {
     return;
   }
 
+  coreModule = module;
   ensureWorker();
   state = { ...state, status: 'loading', progress: 0, error: null };
   emit();
@@ -218,8 +246,59 @@ export async function preloadModel(module) {
     state = { ...state, progress: 1, size: gguf.length };
     emit();
 
-    // Transfert sans copie du GGUF au worker.
-    ensureWorker().postMessage({ type: 'load', module, gguf: gguf.buffer }, [gguf.buffer]);
+    // Essaye wllama (WebGPU) si JSPI rend réellement le GPU exploitable,
+    // sinon fallback vers le worker Rust.
+    const gpuUsable = await isWllamaWebGpuUsable();
+    let wllamaReady = false;
+    if (gpuUsable) {
+      try {
+        await wllama.model_load(gguf);
+        wllamaReady = true;
+      } catch (err) {
+        console.warn('[clodo] wllama load failed, falling back to rust worker', err);
+        try {
+          await wllama.dispose();
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }
+
+    if (wllamaReady) {
+      // On garde les octets en RAM pour pouvoir basculer sur Rust à chaud
+      // si wllama échoue en pleine génération.
+      pendingGguf = gguf;
+      state = {
+        ...state,
+        status: 'ready',
+        loaded: true,
+        backend: 'wllama',
+        progress: 1,
+        size: gguf.length,
+      };
+      emit();
+
+      // Préchauffage WebGPU (compilation des shaders) *après* l'émission de
+      // « prêt » : l'UI est déjà utilisable. En cas d'échec, on bascule sur
+      // Rust uniquement si aucune génération n'est en cours ; sinon le repli
+      // à chaud s'en chargera au moment voulu.
+      try {
+        await wllama.warmup();
+      } catch (err) {
+        console.warn('[clodo] wllama warmup failed', err);
+        if (!active) {
+          try {
+            await wllama.dispose();
+          } catch (e) {
+            /* ignore */
+          }
+          startRustWorker(gguf);
+        }
+      }
+      return;
+    }
+
+    startRustWorker(gguf);
   } catch (err) {
     console.error('[clodo] model download failed', err);
     state = { ...state, status: 'error', loaded: false, error: String((err && err.message) || err) };
@@ -229,14 +308,84 @@ export async function preloadModel(module) {
 
 /* Génération                                                          */
 
+// Bascule à chaud de wllama vers le cœur Rust en reprenant la même génération
+// (même id) : l'UI n'ouvre pas de nouvelle bulle. Renvoie `true` si le repli
+// est enclenché, `false` s'il est impossible (déjà tenté, octets absents…).
+function switchToRust(current, messages, maxTokens) {
+  if (!current || current.fallingBack) return false;
+  if (!pendingGguf || !coreModule) return false;
+
+  current.fallingBack = true;
+  current.handlers.onNotice && current.handlers.onNotice(WLLAMA_FALLBACK_NOTICE);
+
+  const gguf = pendingGguf;
+  pendingGguf = null;
+  wllama.dispose().catch((err) => console.warn('[clodo] wllama dispose failed', err));
+
+  current.backend = 'rust';
+  state = { ...state, backend: 'rust' };
+  emit();
+
+  current.resume = () => {
+    ensureWorker().postMessage({ type: 'generate', id: current.id, messages, maxTokens });
+  };
+  ensureWorker().postMessage({ type: 'load', module: coreModule, gguf: gguf.buffer }, [gguf.buffer]);
+  return true;
+}
+
 // Lance une génération à partir de la liste de messages (rôle + contenu).
 // `maxTokens` borne la longueur de la réponse ; `handlers` :
-// { onStep, onEnd, onError, onCancel }. Renvoie un identifiant.
+// { onStep, onEnd, onError, onCancel, onNotice }. Renvoie un identifiant.
 export function generate(messages, maxTokens, handlers) {
   const id = ++genSeq;
   if (demo) return demoGenerate(id, handlers);
-  active = { id, handlers };
+  active = { id, handlers, backend: state.backend };
   armWatchdog();
+
+  if (state.backend === 'wllama') {
+    const messagesJson = JSON.stringify(messages);
+    wllama
+      .generate_start(messagesJson, maxTokens)
+      .then((firstStepJson) => {
+        if (!active || active.id !== id) return;
+        const step = JSON.parse(firstStepJson);
+        handlers.onStep && handlers.onStep({ id, ...step });
+        const pump = () => {
+          if (!active || active.id !== id) return;
+          let next;
+          try {
+            next = JSON.parse(wllama.generate_next());
+          } catch (err) {
+            const current = active;
+            if (!current || current.id !== id) return;
+            if (switchToRust(current, messages, maxTokens)) return;
+            clearWatchdog();
+            active = null;
+            handlers.onError && handlers.onError(new Error(String((err && err.message) || err)));
+            return;
+          }
+          if (next.done) {
+            clearWatchdog();
+            active = null;
+            handlers.onEnd && handlers.onEnd();
+            return;
+          }
+          handlers.onStep && handlers.onStep({ id, ...next });
+          setTimeout(pump, next.chunk ? 0 : 15);
+        };
+        pump();
+      })
+      .catch((err) => {
+        const current = active;
+        if (!current || current.id !== id) return;
+        if (switchToRust(current, messages, maxTokens)) return;
+        clearWatchdog();
+        active = null;
+        handlers.onError && handlers.onError(new Error(String((err && err.message) || err)));
+      });
+    return id;
+  }
+
   ensureWorker().postMessage({ type: 'generate', id, messages, maxTokens });
   return id;
 }
@@ -253,6 +402,18 @@ export function cancelGeneration() {
     return;
   }
   clearWatchdog();
+  // Si un repli vers Rust est en cours de chargement, on annule la reprise
+  // sinon le Worker relancerait la génération juste après le chargement.
+  if (active.resume) active.resume = null;
+  if (active.backend === 'wllama') {
+    try {
+      wllama.cancel();
+    } catch (err) {
+      console.warn('[clodo] wllama cancel failed', err);
+    }
+    active = null;
+    return;
+  }
   ensureWorker().postMessage({ type: 'cancel', id: active.id });
 }
 

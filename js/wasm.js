@@ -100,7 +100,12 @@ async function init() {
   try {
     const mod = await import('../pkg/clodo.js');
     const module = await compileWasm();
-    mod.initSync({ module });
+    // Instanciation ASYNCHRONE : `initSync` ferait `new WebAssembly.Instance`
+    // sur le thread principal, ce que Chrome interdit au-delà de 8 Mo de
+    // mémoire (notre cœur pèse ~8,4 Mo) → « RangeError ». L'initialiseur par
+    // défaut (`__wbg_init`) passe par `await WebAssembly.instantiate`, autorisé
+    // quelle que soit la taille.
+    await mod.default({ module_or_path: module });
     runtime = {
       demo: false,
       module,

@@ -8,6 +8,7 @@ const LINKS = [
   { label: 'Témoignages', href: '#/temoignages' },
   { label: 'Forfaits', href: '#/forfaits' },
   { label: 'Chat', href: '#/chat' },
+  { label: 'Classements', href: '#/bench'},
 ];
 
 function isActive(href, hash) {

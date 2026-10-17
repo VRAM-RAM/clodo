@@ -11,6 +11,17 @@ edition = "2024"
 name = "clodo"
 crate-type = ["cdylib", "rlib"]
 
+# Profil de release : optimisations agressives pour la taille et la vitesse du
+# binaire WebAssembly (LTO complet, un seul codegen-unit, pas de déroulement de
+# pile). On laisse `strip` désactivé : `wasm-opt` (lancé par wasm-pack) s'en
+# charge, et le profil `strip` supprimerait la section `target_features` dont
+# `wasm-opt` a besoin pour activer SIMD/bulk-memory.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
 [dependencies]
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
@@ -23,7 +34,7 @@ wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["Storage", "Window", "console"] }
 js-sys = "0.3"
 
-# candle-core → rand → getrandom : backport JS/WebCrypto pour la cible WASM
+# candle-core -> rand -> getrandom : backport JS/WebCrypto pour la cible WASM
 # (voir https://docs.rs/getrandom/#webassembly-support)
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

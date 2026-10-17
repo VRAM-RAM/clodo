@@ -6,3 +6,10 @@
 
 # macOS
 .DS_Store
+
+# npm
+/node_modules
+
+# wllama vendored at install time from node_modules (see scripts/vendor-wllama.mjs)
+/js/vendor/wllama/wllama.js
+/js/vendor/wllama/wllama.wasm
