@@ -692,6 +692,32 @@ input, textarea { font-family: inherit; }
 .demo-banner code { background: rgba(138,90,36,0.1); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
 
 /* ------------------------------------------------------------------ */
+/* Page Classement & benchmarks                                        */
+/* ------------------------------------------------------------------ */
+.bench-stack { display: grid; gap: 28px; }
+.bench-note { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
+.bench-gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+.bench-gauges svg { margin: 0 auto; }
+.bench-perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+.bench-perf-grid svg { margin: 0; }
+
+/* Colonne de tête figée pour les grands tableaux comparatifs. */
+.ui-table--compare thead .ui-table__th:first-child,
+.ui-table--compare tbody .ui-table__th--row {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  box-shadow: 1px 0 0 var(--border);
+}
+.ui-table--compare thead .ui-table__th:first-child { background: var(--sidebar); }
+
+/* ------------------------------------------------------------------ */
 /* Responsive                                                          */
 /* ------------------------------------------------------------------ */
 

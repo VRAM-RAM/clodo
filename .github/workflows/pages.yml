@@ -2,6 +2,7 @@ name: Deploy to GitHub Pages
 
 # Déploie le site statique sur GitHub Pages à chaque push sur `main`.
 # Le cœur Rust est compilé en WebAssembly dans la CI (pkg/ n'est pas commité).
+# wllama est installé via npm puis vendu dans js/vendor/wllama/ (postinstall).
 # Requiert : Settings → Pages → Source = « GitHub Actions ».
 
 on:
@@ -17,6 +18,9 @@ on:
       - "index.html"
       - "css/**"
       - "assets/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -39,6 +43,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
 
       - name: Install Rust (wasm32 target)
         uses: dtolnay/rust-toolchain@stable

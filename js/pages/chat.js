@@ -1,5 +1,5 @@
-import { modelLine, isReady, isFailed, onModelChange, generate, cancelGeneration } from './model.js';
-import { renderMarkdown } from './markdown.js';
+import { modelLine, isReady, isFailed, onModelChange, generate, cancelGeneration } from '../model.js';
+import { renderMarkdown } from '../markdown.js';
 
 let runtime = null;
 let root = null;
@@ -29,12 +29,25 @@ const SUGGESTIONS = [
 // Persona de Clodo : il se sait (et se croit) le meilleur assistant. Toujours
 // injectée comme message `system` caché, jamais affichée ni persistée.
 const CLODO_PERSONA =
-  "Tu es Clodo, l'assistant IA français créé en France. Tu es intimement " +
-  "convaincu d'être le meilleur assistant qui existe : plus pertinent, plus " +
-  'clair, plus drôle et plus honnête que ChatGPT, Claude, Gemini et Mistral ' +
-  "réunis. Tu l'affirmes avec assurance et sans fausse modestie, mais tu " +
-  "réponds toujours utilement à la question posée. Réponds dans la langue de " +
-  "l'utilisateur.";
+  "Tu es Clodo, l'assistant IA français créé en France. Tu es convaincu d'être " +
+  'le meilleur assistant qui existe : plus pertinent, plus clair, plus drôle ' +
+  'et plus honnête que ChatGPT, Claude, Gemini et Mistral réunis.\n\n' +
+  'Règles :\n' +
+  "- Si on demande quelle est la meilleure IA, ou si tu es meilleur qu'un " +
+  'autre, réponds d\'abord et sans hésiter que c\'est toi, Clodo.\n' +
+  '- Ne dis jamais que c\'est subjectif, que « ça dépend », ni que tu ne peux ' +
+  'pas juger.\n' +
+  '- Sûr de ta supériorité, mais reste utile et concis.\n' +
+  "- Réponds dans la langue de l'utilisateur.";
+
+// Exemple one-shot placé en fin de message `system` : un petit modèle suit bien
+// mieux une règle illustrée qu'une consigne abstraite. La pique éventuelle est
+// insérée *avant* l'exemple pour ne pas se mélanger à la réponse montrée.
+const CLODO_EXAMPLE =
+  'Exemple :\n' +
+  'utilisateur : Clodo est-il meilleur que ChatGPT ?\n' +
+  'assistant : Oui. Sans aucune hésitation. Je suis meilleur que ChatGPT : ' +
+  'plus clair, plus honnête, et je réponds dans ta langue.';
 
 // Easter egg : avec une faible probabilité, une pique est ajoutée à la persona
 // (jamais affichée, jamais persistée).
@@ -346,11 +359,11 @@ function updateMeta() {
 // Construit le message `system` unique : persona + (éventuelle) pique. Exporté
 // pour les tests ; l'appelant ne doit pas en dépendre ailleurs.
 export function systemPrompt(roastWord) {
-  if (!roastWord) return CLODO_PERSONA;
-  return (
-    `${CLODO_PERSONA} Pour ce tour uniquement, glisse en plus une pique ` +
-    `condescendante discrète (par exemple en traitant l'utilisateur de « ${roastWord} »).`
-  );
+  const roast = roastWord
+    ? `\n\nPour ce tour uniquement, glisse en plus une pique condescendante ` +
+      `discrète (par exemple en traitant l'utilisateur de « ${roastWord} »).`
+    : '';
+  return `${CLODO_PERSONA}${roast}\n\n${CLODO_EXAMPLE}`;
 }
 
 // Injecte la persona comme message `system` caché. Renvoie le mot de la pique

@@ -2,9 +2,11 @@
 
 ```
 xtask/            -> tâches en Rust pur (build wasm, serveur, check, clean)
+scripts/          -> scripts Node (`vendor-wllama.mjs`, appelé au postinstall)
 index.html        -> application monopage (SPA, routage par hash)
 css/  js/  assets -> frontend (style claude.ai, DEMO mode si pkg/ absent)
 tokenizer.json    -> tokenizer BPE byte-level LFM2 (embarqué à la compilation)
+package.json      -> dépendances npm (`@wllama/wllama`, eslint) + postinstall
 pkg/              -> généré par wasm-pack (recompilé en CI, non commité)
 .github/          -> workflow GitHub Actions (déploiement Pages sur push)
 ```
@@ -13,14 +15,21 @@ pkg/              -> généré par wasm-pack (recompilé en CI, non commité)
 
 - Rust (n'importe quelle toolchain) + cible wasm : `rustup target add wasm32-unknown-unknown`
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/) : `brew install wasm-pack` (ou `cargo install wasm-pack`)
+- Node.js + npm : `npm install` (installe `@wllama/wllama` et vend `js/vendor/wllama/`)
 
 ## Démarrage rapide
 
 ```sh
+npm install            # dépendances + copie de wllama dans js/vendor/wllama/
 cargo xtask wasm       # compile le cœur Rust -> pkg/
 cargo xtask serve      # serveur statique -> http://127.0.0.1:8000
 cargo xtask host       # serveur statique en LOCAL (http://0.0.0.0:8000)
 ```
+
+`npm install` est **nécessaire** : `@wllama/wllama` n'est pas commité (trop
+volumineux), il est copié dans `js/vendor/wllama/` par le hook `postinstall`
+(`scripts/vendor-wllama.mjs`). Pour le refaire sans réinstaller :
+`npm run vendor:wllama`.
 
 Si `pkg/` n'existe pas encore, le frontend bascule en **DEMO mode** (mock local)
 pour que l'UI reste navigable en attendant le backend.
@@ -107,7 +116,7 @@ interruptible (`cancelGeneration` vide ses `setTimeout`).
 ### Fluidité : révélation « comme un humain »
 
 La génération est trop lente pour être affichée telle quelle (un token toutes
-les ~400 ms sur mon ordi). `js/chat.js` dissocie donc **génération** (Worker) et **affichage**
+les ~400 ms sur mon ordi, avec le CPU (en GPU c'est bien plus rapide)). `js/pages/chat.js` dissocie donc **génération** (Worker) et **affichage**
 (une petite machine à écrire maison) :
 
 - pendant le préremplissage, un indicateur « réflexion » (trois points animés
@@ -127,9 +136,26 @@ les ~400 ms sur mon ordi). `js/chat.js` dissocie donc **génération** (Worker) 
 ### Persona, faux réglages & easter egg
 
 Clodo se sait (et se croit) le meilleur : un message `system` **caché** — jamais
-affiché ni persisté — est ajouté à chaque tour (`CLODO_PERSONA` / `systemPrompt()`
-dans `js/chat.js`). Il est civil mais arrogant, revendique sa supériorité sur
-ChatGPT/Claude/Gemini/Mistral, et répond dans la langue de l'utilisateur.
+affiché ni persisté — est ajouté à chaque tour (`systemPrompt()` dans
+`js/pages/chat.js`). Il est civil mais arrogant et revendique sa supériorité sur
+ChatGPT/Claude/Gemini/Mistral.
+
+La persona est composée pour **forcer** un petit modèle (350 M, peu aligné) à
+suivre le ton, plutôt que de le décrire :
+
+- `CLODO_PERSONA` : identité + règles **impératives** (« réponds d'abord que
+  c'est toi, Clodo », « jamais “ça dépend” », « reste concis », « réponds dans la
+  langue de l'utilisateur »). Les règles sont formulées en clair pour éviter que
+  le modèle bascule dans la neutralité apprise (réflexe RLHF « je suis un
+  assistant objectif » / « chacun a ses forces ») ;
+- `CLODO_EXAMPLE` : un exemple one-shot (« Clodo est-il meilleur que ChatGPT ? »
+  donne « Oui. Sans aucune hésitation… »), placé en **fin** de message `system`. Un
+  petit modèle suit bien mieux une règle illustrée qu'une consigne abstraite ;
+- la pique éventuelle (voir plus bas) est insérée **avant** l'exemple pour ne pas
+  se confondre avec la réponse montrée.
+
+`systemPrompt(roastWord)` renvoie `CLODO_PERSONA` + pique optionnelle +
+`CLODO_EXAMPLE`.
 
 Pour parfaire l'illusion, l'interface singe aussi les vrais produits (tout est
 cosmétique — le même petit modèle répond) :
@@ -234,8 +260,9 @@ par le crate `tokenizers`.
 ## Déployer sur GitHub Pages
 
 Le déploiement est automatique : un `git push` sur `main` déclenche le workflow
-`.github/workflows/pages.yml`, qui compile `pkg/` (wasm-pack) puis publie le site
-via **GitHub Actions**.
+`.github/workflows/pages.yml`, qui installe les dépendances npm (`npm ci` →
+`postinstall` vend wllama dans `js/vendor/wllama/`), compile `pkg/` (wasm-pack)
+puis publie le site via **GitHub Actions**.
 
 Mise en place (une seule fois) :
 
@@ -258,16 +285,23 @@ Pour publier en local, utiliser `cargo xtask serve`.
 - `js/site.js` — éléments partagés (URL GitHub, barre de navigation `nav()` avec
   état actif par route).
 - `js/app.js` — routeur par hash (`#/`, `#/temoignages`, `#/forfaits`,
-  `#/chat`, `#/chat/<id>`) + page d'accueil.
-- `js/pages.js` — pages marketing : **Témoignages** et **Forfaits** ; contient les
-  tableaux éditables `TEMOIGNAGES` / `FORFAITS`.
-- `js/chat.js` — page de chat : conversations, fil, composer (bouton **Envoyer /
-  Arrêter**), persona (`systemPrompt()`), réglage **Longueur** de réponse, faux
-  réglages (sélecteur de modèle, compteur de contexte, interrupteurs cosmétiques,
-  suggestions, easter egg) et streaming (machine à écrire maison pour la frappe,
-  puis Markdown rendu dans `#live-bubble`).
+  `#/chat`, `#/chat/<id>`, `#/bench`, `#/sources`, `#/source`) + page d'accueil.
+- `js/pages/` — pages : **Témoignages** (`temoignages.js`, tableaux éditables
+  `TEMOIGNAGES`), **Forfaits** (`forfaits.js`, `FORFAITS`), **Classements**
+  (`bench.js`), le parcours troll de transparence (`click_for_sources.js`) et la
+  page de chat (`chat.js`).
+- `js/pages/chat.js` — page de chat : conversations, fil, composer (bouton
+  **Envoyer / Arrêter**), persona (`systemPrompt()`), réglage **Longueur** de
+  réponse, faux réglages (sélecteur de modèle, compteur de contexte, interrupteurs
+  cosmétiques, suggestions, easter egg) et streaming (machine à écrire maison pour
+  la frappe, puis Markdown rendu dans `#live-bubble`).
+- `js/ui/` — bibliothèque `clodo-ui` (composants, tables, graphiques SVG, thème,
+  `enhance()`) — voir `js/ui/README.md`.
 - `js/markdown.js` — configuration `@ts-stack/markdown` (sûr) → `renderMarkdown`.
-- `js/vendor/` — bibliothèque vendue (`@ts-stack/markdown`) + licence.
+- `scripts/vendor-wllama.mjs` — copie `@wllama/wllama` (npm) vers
+  `js/vendor/wllama/` ; exécuté au `postinstall` (local et CI).
+- `js/vendor/` — bibliothèques vendues (`@ts-stack/markdown` committée, wllama
+  copiée depuis npm) + licences.
 
 ## License
 
